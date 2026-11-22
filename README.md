@@ -6,7 +6,7 @@
 
 ---
 
-## 一、问题现场
+## 一、问题现场与错误码速诊
 
 Antigravity 直连 Google Code Assist 报错：
 
@@ -14,7 +14,17 @@ Antigravity 直连 Google Code Assist 报错：
 dial tcp 172.217.114.4:443: connectex: A connection attempt failed
 ```
 
-被墙 IP 裸连超时。此时系统代理（Clash）明明开着——**为什么没用？**
+被墙 IP 裸连超时。此时系统代理（Clash）明明开着——**为什么没用？** 看下面原理。
+
+**三种错误码，三个不同根因**（先对号入座）：
+
+| 错误码 | 根因 | 修法 |
+|---|---|---|
+| `dial tcp ... timeout` | 域名被墙裸连（系统代理管不到 Electron） | → 第四节方案 A |
+| `403 LOCATION_NOT_ELIGIBLE` | 某个 googleapis 子域名**掉进直连规则**，CN 出口被拒 | Clash 分流补该域名 |
+| `400 User location is not supported` | ①AI 扩展的 **Node 内置 fetch（undici）天生无视系统代理+环境变量**；②代理节点在受限区 | `http.proxySupport: "on"` + 换节点 |
+
+**判定技巧**：同一代理出口 IP 下，**网页 200 而 agent API 400** = 不是 IP 的问题，是请求没走代理（网络栈差异）。
 
 ## 二、核心原理（30 秒看懂）
 
@@ -35,27 +45,32 @@ netstat -ano | findstr "LISTENING" | findstr ":7897 :7890"
 :: ② 定位应用配置目录
 dir "%APPDATA%" | findstr /i "antigravity"
 
-:: ③ 验证代理端口可出网
+:: ③ 验证代理端口可出网 + 出口国家
 curl -x http://127.0.0.1:7897 -I https://www.google.com --max-time 8
+curl -x http://127.0.0.1:7897 https://api.country.is/
 ```
 
 ## 四、修复落地
 
-`%APPDATA%\Antigravity\User\settings.json` 顶层加一行：
+`%APPDATA%\Antigravity\User\settings.json`（不存在就新建）：
 
 ```json
-"http.proxy": "http://127.0.0.1:7897",
+{
+  "http.proxy": "http://127.0.0.1:7897",
+  "http.proxySupport": "on"
+}
 ```
 
-重启应用即可。完整细节（含应用内 UI 路径、JSON 语法注意）见 [SKILL.md](SKILL.md)。
+**为什么必须 `proxySupport: "on"`**：AI 扩展用的是 **Node 内置 fetch（undici）——它天生无视系统代理，也无视 HTTP_PROXY 环境变量**。只有 VSCode 的强制代理模式能把它按进代理。只设 `http.proxy` 而不开 "on" = 渲染端走代理但 AI 扩展仍直连。
+
+完整细节（应用内 UI 路径、合并启动脚本、JSON 语法注意）见 [SKILL.md](SKILL.md)。
 
 ## 五、额度闭环：Google AI Pro 学割订阅
 
 代理通了只是进门，**免费额度抠搜**才是痛点。日本区学生割：
 
-- **JP¥720/月**（75% off，原价 ¥2,900）≈ **30 元人民币/月**，最长锁定 **4 年**
-- 学生认证通过后直接锁价（申请截止 2026-12-31）
-- 订阅成功确认页：
+- **JP¥720/月**（75% off，原价 ¥2,900）≈ **30 元人民币/月**，最长锁定 **4 年**（申请截止 2026-12-31）
+- 学生认证通过后直接锁价，订阅成功确认页：
 
 ![Google AI Pro 订阅成功](images/ai-pro-subscribed.png)
 
@@ -80,20 +95,38 @@ curl -x http://127.0.0.1:7897 -I https://www.google.com --max-time 8
 | Hydrogen 氢 | 快枪手：快速执行 / agent 工作流 |
 | Argon 氩 | 上一代老兵 |
 
+**实战提示**：Claude 系模型走 Anthropic 路由、**不受谷歌账号区域风控影响**——Gemini 4 报 400 时切 Claude 干活零损失。
+
 ## 七、坑清单（每个都咬过人）
 
 | 坑 | 症状 | 规避 |
 |---|---|---|
 | 系统代理陷阱 | 系统代理开着 Electron 仍直连 | 应用内显式配置 |
+| **undici fetch 陷阱** | 环境变量+系统代理全设了，AI 扩展仍直连 | `proxySupport: "on"` |
+| **Go gRPC 陷阱** | 部分 gRPC 调用不读 HTTP_PROXY | 关键域名走 Clash 分流兜底 |
+| 第三方启动入口 | 汉化包 bat 等不带代理变量，400 复发 | 合并启动脚本统一注入 |
 | TUN 坑① | 杀软拦 TUN 驱动，静默失效 | 加白名单或不用 TUN |
 | TUN 坑② | IPv6 绕过 TUN 直连 | 关 IPv6 或 TUN 接管 IPv6 |
 | TUN 坑③ | TUN 自启失败，重启即失效 | 设自启并验证 |
 | 端口抄默认 | 教程 7890 实际 7897 | netstat 实测 |
 | proxy 缺协议头 | `127.0.0.1:7897` 不生效 | 必须带 `http://` |
 | JSON 改坏 | settings.json 语法错 → 设置全灭 | 改前备份 |
+| cmd 脚本编码 | LF/UTF-8/中文注释 → cmd 拆错行乱码 | CRLF + 无 BOM + 纯 ASCII |
+| 中文路径进 cmd | Git Bash 调中文 bat 报错 | PowerShell `Start-Process -FilePath` |
 | 订阅后模型不可用 | plan 权限缓存旧 | 重启应用 |
 
-## 八、汉化包启动（中文界面）
+## 八、更新存活表（应用自动更新后逐项核对）
+
+| 项 | 更新后 | 依据 |
+|---|---|---|
+| settings.json（http.proxy） | ✅ 存活 + 启动自愈 | 用户配置目录独立于安装目录；启动脚本自动检测恢复 |
+| 启动脚本 / VBS / 自愈 js | ✅ 存活 | 自建目录（AntigravityLauncher）更新器不认识、永不被覆盖 |
+| 汉化 | ✅ 自动重注入 | ensure_localized --fix 每次启动跑 |
+| 代理环境变量 | ✅ | 启动脚本每次注入 |
+| 快捷方式 | ⚠️ 会被重置回裸 exe | 已知行为：**首次裸点中招一次 → 再点一次快捷方式自愈** |
+| 订阅 / 云端模型 | ✅ | 账号级 |
+
+## 九、汉化包启动（中文界面）
 
 Antigravity 官方自动更新会冲掉汉化——用汉化包的启动入口（自动检查/重注入汉化再启动）：
 
@@ -101,16 +134,17 @@ Antigravity 官方自动更新会冲掉汉化——用汉化包的启动入口�
 D:\...\antigravity2-cn-main\启动Antigravity(自动检查汉化).bat
 ```
 
-内部执行 `node scripts/ensure_localized.js --fix --launch`。**注意**：重注入需应用先关闭（文件占用）。
+内部执行 `node scripts/ensure_localized.js --fix --launch`。**注意**：重注入需应用先关闭（文件占用）；该入口**不带代理变量**，生产环境请用第四节合并启动脚本。
 
-## 九、一页速查
+## 十、一页速查
 
 ```
-症状：VSCode 内核应用连不上被墙域名，系统代理无效
-  → netstat 确认代理端口 → %APPDATA%\应用名\User\settings.json
-  → 加 "http.proxy": "http://127.0.0.1:端口" → 重启 → 验证
-  → 失败则查：端口 / 节点 / JSON 语法 / 应用更新重置配置
-  → 订阅 Google AI Pro 解锁额度 → 重启应用解锁 Gemini 4 系列
+症状：VSCode 内核应用连不上被墙域名 / 400 location not supported
+  → netstat 确认代理端口 → curl api.country.is 验出口国家
+  → settings.json: {"http.proxy":"http://127.0.0.1:PORT","http.proxySupport":"on"}
+  → 合并启动脚本(代理env+汉化+启动) → 重启 → 验证
+  → 403=分流补域名(Merge.yaml) / 400=proxySupport on+换节点 / 订阅锁额度
+  → 更新后失效 = 快捷方式重置(点两次自愈) + 配置自愈兜底
   → 不选 TUN（三坑），不改系统代理（伤全局）
 ```
 
